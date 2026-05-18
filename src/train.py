@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-复现 Grokking 论文中的 x * y (mod p) 实验
+复现 Grokking 论文中的模运算实验
 论文: "Grokking: Generalization Beyond Overfitting on Small Algorithmic Datasets"
 
-任务: 给定 (x, ×, y)，预测 (x * y) % p
-其中 p = 97
+支持四种模运算：x+y, x-y, x*y, x÷y (mod p)
+
+使用方法:
+    python train.py --operation add      # x + y mod 97
+    python train.py --operation sub      # x - y mod 97
+    python train.py --operation mul      # x * y mod 97
+    python train.py --operation div      # x ÷ y mod 97
 """
 
 import os
 import csv
+import json
+import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -20,7 +27,6 @@ import math
 class Config:
     # 数据参数
     p = 97  # 模数
-    operation = "mul"  # 乘法: x * y
 
     # 模型参数 (与原论文一致)
     num_layers = 2
@@ -28,28 +34,41 @@ class Config:
     num_heads = 4
     attention_dim = 128
     ffn_dim = 512
-    max_len = 3  # 输入序列长度: [x, ×, y]
+    max_len = 3  # 输入序列长度: [x, op, y]
 
     # 训练参数 (原论文设置)
     batch_size = 512
     lr = 1e-3
-    weight_decay = 0.005  # 尝试稍小的 wd
+    weight_decay = 0.005
     betas = (0.9, 0.98)
     total_steps = 100000  # 总训练步数
-    warmup_steps = 2000  # 论文设置: 2000步 warmup
+    warmup_steps = 2000
 
     # 保存和记录
     save_interval = 100  # 每100步保存
-    checkpoint_dir = "/root/data1/zjj/Grokking_Formulation/data/x*y/checkpoints"
-    metric_file = "/root/data1/zjj/Grokking_Formulation/data/x*y/metric.csv"
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def __init__(self, operation):
+        self.operation = operation
+        # 根据运算类型设置路径
+        op_names = {
+            'add': 'x+y',
+            'sub': 'x-y',
+            'mul': 'x*y',
+            'div': 'x_div_y'
+        }
+        op_dir = op_names.get(operation, operation)
+        # 获取项目根目录（src/ 的上级）
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.checkpoint_dir = os.path.join(project_root, 'data', op_dir, 'checkpoints')
+        self.metric_file = os.path.join(project_root, 'data', op_dir, 'metric.csv')
 
 
 # ==================== 数据集 ====================
 class ModuloDataset(Dataset):
     """模运算数据集"""
 
-    def __init__(self, p, operation="mul", train=True, train_ratio=0.5, seed=0):
+    def __init__(self, p, operation="add", train=True, train_ratio=0.5, seed=0):
         self.p = p
         self.operation = operation
 
@@ -59,12 +78,12 @@ class ModuloDataset(Dataset):
             for y in range(p):
                 all_pairs.append((x, y))
 
-        # 使用固定随机种子进行随机划分 (论文中的做法)
+        # 使用固定随机种子进行随机划分
         import random
         random.seed(seed)
         random.shuffle(all_pairs)
 
-        # 划分训练集和测试集 (原论文使用 50% 划分)
+        # 划分训练集和测试集
         n_train = int(len(all_pairs) * train_ratio)
         if train:
             self.pairs = all_pairs[:n_train]
@@ -79,20 +98,22 @@ class ModuloDataset(Dataset):
     def __getitem__(self, idx):
         x, y = self.pairs[idx]
 
-        # 计算 x * y (mod p)
-        if self.operation == "sub":
-            label = (x - y) % self.p
-        elif self.operation == "add":
+        # 计算运算结果
+        if self.operation == "add":
             label = (x + y) % self.p
+        elif self.operation == "sub":
+            label = (x - y) % self.p
         elif self.operation == "mul":
             label = (x * y) % self.p
         elif self.operation == "div":
-            # 对于除法，需要处理 y=0 的情况
+            # 除法：x / y = x * y^(-1) mod p
+            # 对于 y=0，特殊处理
             if y == 0:
-                label = 0
+                label = 0  # 或其他默认值
             else:
-                y_inv = pow(y, -1, self.p)
-                label = (x * y_inv) % self.p
+                # 计算模逆元
+                inv_y = pow(y, -1, self.p)  # Python 3.8+
+                label = (x * inv_y) % self.p
         else:
             raise ValueError(f"Unknown operation: {self.operation}")
 
@@ -198,7 +219,7 @@ class GrokkingTransformer(nn.Module):
                 config.attention_dim,
                 config.num_heads,
                 config.ffn_dim,
-                dropout=0.1  # 恢复 dropout
+                dropout=0.1
             )
             for _ in range(config.num_layers)
         ])
@@ -228,7 +249,7 @@ class GrokkingTransformer(nn.Module):
 
 # ==================== 学习率调度器 ====================
 class WarmupConstantScheduler:
-    """预热 + 恒定学习率 (warmup 后完全不变)"""
+    """预热 + 恒定学习率"""
 
     def __init__(self, optimizer, warmup_steps):
         self.optimizer = optimizer
@@ -240,10 +261,8 @@ class WarmupConstantScheduler:
         self.current_step += 1
 
         if self.current_step < self.warmup_steps:
-            # Warmup phase
             lr = self.base_lr * (self.current_step / self.warmup_steps)
         else:
-            # 恒定学习率，完全不衰减
             lr = self.base_lr
 
         for param_group in self.optimizer.param_groups:
@@ -277,17 +296,21 @@ def evaluate(model, dataloader, criterion, device):
     return total_loss / total, correct / total
 
 
-def train():
+def train(operation):
     """训练主函数"""
-    config = Config()
+    config = Config(operation)
     device = torch.device(config.device)
 
+    op_symbols = {'add': '+', 'sub': '-', 'mul': '×', 'div': '÷'}
+    symbol = op_symbols.get(operation, operation)
+
     print("=" * 60)
-    print("Grokking Reproduction: x * y (mod 97)")
+    print(f"Grokking Reproduction: x {symbol} y (mod {config.p})")
     print("=" * 60)
     print(f"Device: {device}")
     print(f"Weight Decay: {config.weight_decay}")
     print(f"Total Steps: {config.total_steps}")
+    print(f"Checkpoint Dir: {config.checkpoint_dir}")
     print("=" * 60)
 
     # 创建数据目录
@@ -300,17 +323,28 @@ def train():
     csv_writer.writerow(['step', 'train_loss', 'train_acc', 'test_loss', 'test_acc'])
     csv_file.flush()
 
-    # 创建数据集 (使用固定种子确保可复现)
+    # 创建数据集
     train_dataset = ModuloDataset(config.p, config.operation, train=True, seed=42)
     test_dataset = ModuloDataset(config.p, config.operation, train=False, seed=42)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False)
 
+    # 保存初始数据划分
+    data_dir = os.path.dirname(config.metric_file)
+    train_data_path = os.path.join(data_dir, 'train_data.json')
+    test_data_path = os.path.join(data_dir, 'test_data.json')
+    with open(train_data_path, 'w') as f:
+        json.dump(train_dataset.pairs, f)
+    with open(test_data_path, 'w') as f:
+        json.dump(test_dataset.pairs, f)
+    print(f"Train split saved: {train_data_path} ({len(train_dataset.pairs)} samples)")
+    print(f"Test split saved: {test_data_path} ({len(test_dataset.pairs)} samples)")
+
     # 创建模型
     model = GrokkingTransformer(config).to(device)
 
-    # 优化器 (AdamW with weight decay)
+    # 优化器
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.lr,
@@ -318,11 +352,8 @@ def train():
         weight_decay=config.weight_decay
     )
 
-    # 学习率调度器 (warmup + constant, 完全不衰减)
-    scheduler = WarmupConstantScheduler(
-        optimizer,
-        config.warmup_steps
-    )
+    # 学习率调度器
+    scheduler = WarmupConstantScheduler(optimizer, config.warmup_steps)
 
     # 损失函数
     criterion = nn.CrossEntropyLoss()
@@ -348,22 +379,18 @@ def train():
             # 反向传播
             optimizer.zero_grad()
             loss.backward()
-
             optimizer.step()
             scheduler.step()
 
             # 每100步评估和保存
             if step % config.save_interval == 0:
-                # 评估
                 train_loss, train_acc = evaluate(model, train_loader, criterion, device)
                 test_loss, test_acc = evaluate(model, test_loader, criterion, device)
 
-                # 记录到 CSV
                 csv_writer.writerow([step, f"{train_loss:.6f}", f"{train_acc:.6f}",
                                      f"{test_loss:.6f}", f"{test_acc:.6f}"])
                 csv_file.flush()
 
-                # 打印进度
                 lr = scheduler.base_lr * (step / config.warmup_steps if step < config.warmup_steps else 1)
 
                 print(f"Step {step:6d} | "
@@ -406,5 +433,13 @@ def train():
     print(f"\n最终模型已保存至: {final_path}")
 
 
+# ==================== 主入口 ====================
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description='训练 Grokking 模型进行模运算')
+    parser.add_argument('--operation', type=str, default='add',
+                        choices=['add', 'sub', 'mul', 'div'],
+                        help='运算类型: add(加法), sub(减法), mul(乘法), div(除法)')
+
+    args = parser.parse_args()
+
+    train(args.operation)

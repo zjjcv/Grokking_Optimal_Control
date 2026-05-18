@@ -1,70 +1,14 @@
-# Python
+# Ignore everything
+*
+
+# But not these folders
+!src/
+!src/**
+!utils/
+!utils/**
+
+# Always ignore these
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
-venv/
-ENV/
-env/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb_checkpoints/
-
-# PyTorch - 排除所有大型模型文件
-*.pth
-*.pt
-*.ckpt
-
-# Data - 完全排除数据目录
-data/
-
-# Experiments - 排除所有生成的文件
-experiments/
-
-# Logs
-*.log
-logs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Temporary files
-*.tmp
-temp/
-
-# Archive (备份文件，不需要上传)
-archive/
-
-# Only allow scripts and documentation
-!scripts/
-!*.md
-!requirements.txt
+# Don't ignore .gitignore itself
 !.gitignore
-!LICENSE
