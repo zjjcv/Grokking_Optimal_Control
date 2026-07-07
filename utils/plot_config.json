@@ -25,5 +25,11 @@
         "ncol": 4,
         "frameon": false,
         "fontsize": 11
+    },
+    "style": {
+        "spine_linewidth": 1.8,
+        "tick_width": 1.6,
+        "font_weight": "bold",
+        "font_size": 12
     }
 }

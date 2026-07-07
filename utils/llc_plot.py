@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
 """
-绘制 LLC 与 Train/Test Accuracy 随训练步数的变化（单图双 y 轴）。
+Plot LLC and Train/Test Accuracy.
 
-左 y 轴: Accuracy (蓝色)
-右 y 轴: LLC (绿色)
+Single-seed mode reads:
+  data/{op}/llc.csv
+  data/{op}/metric.csv
 
-数据来源:
-  - data/{op}/llc.csv
-  - data/{op}/metric.csv
-输出: results/{op}/llc_plot.pdf
+Multi-seed mode auto-detects:
+  data/{op}/seed_{seed}/llc.csv and metric.csv
+  data/seed_{seed}/{op}/llc.csv and metric.csv
+  data/{op}/llc_multiseed.csv as a fallback for LLC
 
-绘图配置: utils/plot_config.json
+The multi-seed plot draws mean curves with an error band across seeds.
 """
 
-import os
-import json
-import csv
 import argparse
+import csv
+import json
+import os
+from collections import defaultdict
+
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 OPS = {
     "add": ("x+y", "+"),
     "sub": ("x-y", "-"),
-    "mul": ("x*y", r"\times"),
+    "mul": ("x_mul_y", r"\times"),
     "div": ("x_div_y", r"\div"),
 }
+
+DEFAULT_SEEDS = [0, 1, 2]
 
 
 def load_config():
@@ -41,25 +47,110 @@ def read_csv(path):
         data = {c: [] for c in cols}
         for row in reader:
             for c in cols:
-                data[c].append(float(row[c]))
+                try:
+                    data[c].append(float(row[c]))
+                except ValueError:
+                    data[c].append(row[c])
     return data
 
 
-def plot_one(op_key, project_root, cfg):
+def seed_run_dirs(project_root, op_dir, seeds):
+    data_root = os.path.join(project_root, "data")
+    for seed in seeds:
+        candidates = [
+            os.path.join(data_root, op_dir, f"seed_{seed}"),
+            os.path.join(data_root, f"seed_{seed}", op_dir),
+        ]
+        for run_dir in candidates:
+            if os.path.isdir(run_dir):
+                yield seed, run_dir
+                break
+
+
+def load_seed_series(project_root, op_dir, seeds, filename):
+    series = []
+    for seed, run_dir in seed_run_dirs(project_root, op_dir, seeds):
+        path = os.path.join(run_dir, filename)
+        if os.path.exists(path):
+            data = read_csv(path)
+            data["_seed"] = seed
+            data["_path"] = path
+            series.append(data)
+    return series
+
+
+def rows_from_multiseed_csv(path):
+    if not os.path.exists(path):
+        return []
+    raw = read_csv(path)
+    grouped = defaultdict(lambda: {"step": [], "llc_mean": [], "llc_std": []})
+    for seed, step, mean, std in zip(raw["seed"], raw["step"], raw["llc_mean"], raw["llc_std"]):
+        key = int(seed)
+        grouped[key]["step"].append(step)
+        grouped[key]["llc_mean"].append(mean)
+        grouped[key]["llc_std"].append(std)
+    rows = []
+    for seed, data in sorted(grouped.items()):
+        data["_seed"] = seed
+        data["_path"] = path
+        rows.append(data)
+    return rows
+
+
+def aggregate_by_step(series, value_col, error_mode):
+    by_step = defaultdict(list)
+    for data in series:
+        for step, value in zip(data["step"], data[value_col]):
+            by_step[step].append(value)
+
+    steps, means, errors = [], [], []
+    for step in sorted(by_step):
+        values = np.asarray(by_step[step], dtype=float)
+        steps.append(step)
+        means.append(float(values.mean()))
+        if len(values) <= 1:
+            errors.append(0.0)
+        else:
+            std = float(values.std(ddof=1))
+            errors.append(std / np.sqrt(len(values)) if error_mode == "sem" else std)
+    return np.asarray(steps), np.asarray(means), np.asarray(errors)
+
+
+def plot_curve_with_band(ax, series, value_col, color, linestyle, linewidth, label, error_mode):
+    steps, mean, err = aggregate_by_step(series, value_col, error_mode)
+    if len(steps) == 0:
+        return None
+    line, = ax.plot(steps, mean, color=color, linestyle=linestyle, linewidth=linewidth, label=label)
+    ax.fill_between(steps, mean - err, mean + err, color=color, alpha=0.18, linewidth=0)
+    return line
+
+
+def plot_one(op_key, project_root, cfg, multi_seed=False, seeds=None, error_mode="std"):
     op_dir, symbol = OPS[op_key]
     data_dir = os.path.join(project_root, "data", op_dir)
     llc_path = os.path.join(data_dir, "llc.csv")
     metric_path = os.path.join(data_dir, "metric.csv")
+    seeds = DEFAULT_SEEDS if seeds is None else seeds
 
-    if not os.path.exists(llc_path):
-        print(f"[SKIP] {llc_path} not found")
-        return
-    if not os.path.exists(metric_path):
-        print(f"[SKIP] {metric_path} not found")
-        return
-
-    llc_data = read_csv(llc_path)
-    metric_data = read_csv(metric_path)
+    if multi_seed:
+        llc_series = load_seed_series(project_root, op_dir, seeds, "llc.csv")
+        if not llc_series:
+            llc_series = rows_from_multiseed_csv(os.path.join(data_dir, "llc_multiseed.csv"))
+        metric_series = load_seed_series(project_root, op_dir, seeds, "metric.csv")
+        if not metric_series and os.path.exists(metric_path):
+            metric_series = [read_csv(metric_path)]
+        if not llc_series:
+            print(f"[SKIP] no multi-seed LLC data found for {op_dir}")
+            return
+    else:
+        if not os.path.exists(llc_path):
+            print(f"[SKIP] {llc_path} not found")
+            return
+        if not os.path.exists(metric_path):
+            print(f"[SKIP] {metric_path} not found")
+            return
+        llc_data = read_csv(llc_path)
+        metric_data = read_csv(metric_path)
 
     out_dir = os.path.join(project_root, "results", op_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -73,11 +164,21 @@ def plot_one(op_key, project_root, cfg):
 
     fig, ax_acc = plt.subplots(figsize=cfg["figure"]["figsize"])
 
-    # 左 y 轴: Accuracy
-    l1, = ax_acc.plot(metric_data["step"], metric_data["train_acc"],
-                      color=c_acc, linestyle=ls_train, linewidth=lw, label="Train Acc")
-    l2, = ax_acc.plot(metric_data["step"], metric_data["test_acc"],
-                      color=c_acc, linestyle=ls_test, linewidth=lw, label="Test Acc")
+    handles = []
+    if multi_seed:
+        h = plot_curve_with_band(ax_acc, metric_series, "train_acc", c_acc, ls_train, lw, "Train Acc", error_mode)
+        if h is not None:
+            handles.append(h)
+        h = plot_curve_with_band(ax_acc, metric_series, "test_acc", c_acc, ls_test, lw, "Test Acc", error_mode)
+        if h is not None:
+            handles.append(h)
+    else:
+        l1, = ax_acc.plot(metric_data["step"], metric_data["train_acc"],
+                          color=c_acc, linestyle=ls_train, linewidth=lw, label="Train Acc")
+        l2, = ax_acc.plot(metric_data["step"], metric_data["test_acc"],
+                          color=c_acc, linestyle=ls_test, linewidth=lw, label="Test Acc")
+        handles.extend([l1, l2])
+
     ax_acc.set_xlabel("Step")
     ax_acc.set_ylabel("Accuracy", color=c_acc)
     ax_acc.tick_params(axis="y", labelcolor=c_acc)
@@ -85,32 +186,43 @@ def plot_one(op_key, project_root, cfg):
     ax_acc.set_ylim(cfg["axis"]["acc_ylim"])
     ax_acc.grid(True, alpha=cfg["grid"]["alpha"])
 
-    # 右 y 轴: LLC
     ax_llc = ax_acc.twinx()
-    l3, = ax_llc.plot(llc_data["step"], llc_data["llc_mean"],
-                      color=c_llc, linewidth=lw, label="LLC")
+    if multi_seed:
+        h = plot_curve_with_band(ax_llc, llc_series, "llc_mean", c_llc, "-", lw, "LLC", error_mode)
+        if h is not None:
+            handles.append(h)
+    else:
+        l3, = ax_llc.plot(llc_data["step"], llc_data["llc_mean"],
+                          color=c_llc, linewidth=lw, label="LLC")
+        handles.append(l3)
     ax_llc.set_ylabel("LLC", color=c_llc)
     ax_llc.tick_params(axis="y", labelcolor=c_llc)
 
-    ax_acc.set_title(f"x {symbol} y mod 97")
+    suffix = f" ({len(seeds)} seeds, {error_mode})" if multi_seed else ""
+    ax_acc.set_title(f"x {symbol} y mod 97{suffix}")
 
-    # 底部共享图例
-    handles = [l1, l2, l3]
-    labels = [h.get_label() for h in handles]
-    fig.legend(handles, labels, loc=leg["loc"], bbox_to_anchor=tuple(leg["bbox_to_anchor"]),
+    fig.legend(handles, [h.get_label() for h in handles],
+               loc=leg["loc"], bbox_to_anchor=tuple(leg["bbox_to_anchor"]),
                bbox_transform=fig.transFigure, ncol=3,
                frameon=leg["frameon"], fontsize=leg["fontsize"])
 
     fig.subplots_adjust(bottom=0.18)
-    pdf_path = os.path.join(out_dir, "llc_plot.pdf")
-    plt.savefig(pdf_path)
+    base_name = "llc_plot_multiseed" if multi_seed else "llc_plot"
+    base = os.path.join(out_dir, base_name)
+    for fmt in ("pdf", "svg"):
+        path = f"{base}.{fmt}"
+        plt.savefig(path, bbox_inches="tight")
+        print(f"[OK] {path}")
     plt.close()
-    print(f"[OK] {pdf_path}")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--operation", choices=list(OPS.keys()) + ["all"], default="all")
+    parser.add_argument("--multi-seed", action="store_true")
+    parser.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_SEEDS)
+    parser.add_argument("--error", choices=["std", "sem"], default="std",
+                        help="Error band across seeds.")
     args = parser.parse_args()
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -118,7 +230,7 @@ def main():
     ops = list(OPS.keys()) if args.operation == "all" else [args.operation]
 
     for op in ops:
-        plot_one(op, project_root, cfg)
+        plot_one(op, project_root, cfg, args.multi_seed, args.seeds, args.error)
 
 
 if __name__ == "__main__":

@@ -12,3 +12,4 @@ __pycache__/
 
 # Don't ignore .gitignore itself
 !.gitignore
+!AGENTS.md

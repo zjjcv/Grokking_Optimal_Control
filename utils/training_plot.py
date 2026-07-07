@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 OPS = {
     "add": ("x+y", "+"),
     "sub": ("x-y", "-"),
-    "mul": ("x*y", r"\times"),
+    "mul": ("x_mul_y", r"\times"),
     "div": ("x_div_y", r"\div"),
 }
 
@@ -93,8 +93,8 @@ def plot_one(op_key, project_root, cfg):
                ncol=leg["ncol"], frameon=leg["frameon"], fontsize=leg["fontsize"])
 
     fig.subplots_adjust(bottom=0.18)
-    pdf_path = os.path.join(out_dir, "training_curves.pdf")
-    plt.savefig(pdf_path)
+    pdf_path = os.path.join(out_dir, "training_curves.svg")
+    plt.savefig(pdf_path, format="svg", bbox_inches="tight", pad_inches=0.05)
     plt.close()
     print(f"[OK] {pdf_path}")
 
